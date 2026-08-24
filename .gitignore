@@ -1,0 +1,13 @@
+# Build artifacts
+/target
+**/*.rs.bk
+
+# Local state / secrets (cookies, reports)
+.rscraper/
+reports/
+*.cookies.txt
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,20 @@
+[package]
+name = "rscraper-core"
+description = "Core engine for rScrapper: fetching, CSS/XPath selectors with element memory, HTML-to-Markdown, and a concurrent spider."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }
+scraper = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+regex = { workspace = true }
+url = { workspace = true }
+futures-util = { workspace = true }

@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rscraper-core",
+    "crates/rscraper-cli",
+    "crates/rscraper-api",
+    "crates/rscraper-mcp",
+    "crates/robin",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["antarikshkarmakar <antariksh.karmakar@gmail.com>"]
+repository = "https://github.com/antarikshkarmakar/rScrapper"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "io-std", "net", "process"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "socks", "rustls-tls", "cookies"] }
+scraper = "0.21"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+thiserror = "1"
+anyhow = "1"
+regex = "1"
+url = "2"
+futures-util = "0.3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

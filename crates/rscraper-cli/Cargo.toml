@@ -1,0 +1,25 @@
+[package]
+name = "rscraper-cli"
+description = "Agent-facing CLI: read pages, search the web, YouTube/GitHub/RSS, optional social platforms, and a doctor check."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "rscraper"
+path = "src/main.rs"
+
+[dependencies]
+rscraper-core = { path = "../rscraper-core" }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+regex = { workspace = true }
+url = { workspace = true }
+scraper = "0.21"
+futures-util = "0.3"
