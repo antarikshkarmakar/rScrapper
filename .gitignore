@@ -11,3 +11,6 @@ reports/
 .idea/
 .vscode/
 .DS_Store
+
+# Local development worktrees
+.worktrees/
