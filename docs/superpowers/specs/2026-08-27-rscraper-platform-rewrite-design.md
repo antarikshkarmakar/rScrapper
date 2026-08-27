@@ -78,7 +78,7 @@ Breaking Rust changes include:
 - Adding a base-URL-aware Markdown conversion API while retaining
   `html_to_markdown(html)` as a compatibility wrapper.
 
-The workspace remains on Rust edition 2021 and declares Rust 1.85 as its MSRV.
+The workspace remains on Rust edition 2021 and declares Rust 1.88 as its MSRV.
 Dependencies must support rustls so the project does not acquire a native
 OpenSSL requirement.
 
