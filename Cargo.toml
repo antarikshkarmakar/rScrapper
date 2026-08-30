@@ -9,24 +9,54 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.88"
 license = "MIT"
 authors = ["antarikshkarmakar <antariksh.karmakar@gmail.com>"]
 repository = "https://github.com/antarikshkarmakar/rScrapper"
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "io-std", "net", "process"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "socks", "rustls-tls", "cookies"] }
-scraper = "0.21"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "io-std", "net", "process", "signal"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "socks", "rustls", "cookies", "charset", "gzip", "brotli", "deflate", "zstd"] }
+scraper = "=0.27.0"
+ego-tree = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 thiserror = "1"
 anyhow = "1"
 regex = "1"
-url = "2"
+url = { version = "2", features = ["serde"] }
 futures-util = "0.3"
+encoding_rs = "0.8"
+mime = "0.3"
+async-trait = "0.1"
+chromiumoxide = { version = "0.9.1", default-features = false }
+tempfile = "3"
+async-tungstenite = { version = "0.32", features = ["tokio-runtime"] }
+base64 = "0.23"
+pulldown-cmark = "0.13.4"
+feed-rs = "2.4.0"
+quick-xml = { version = "0.41.0", features = ["encoding"] }
+rcgen = "0.13"
+tokio-rustls = "0.26"
+libc = "0.2"
+axum = "0.8.9"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.7", features = ["catch-panic", "limit", "request-id", "sensitive-headers", "timeout", "trace"] }
+subtle = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+rmcp = { version = "=3.1.4", default-features = false }
+schemars = "1.0"
+rustix = { version = "1.1.4", features = ["fs"] }
+data-encoding = "2.11.1"
+sha3 = "0.12.0"
+icu_properties = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
 
 [profile.release]
 lto = true

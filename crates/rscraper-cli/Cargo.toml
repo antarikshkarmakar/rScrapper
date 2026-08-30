@@ -3,6 +3,7 @@ name = "rscraper-cli"
 description = "Agent-facing CLI: read pages, search the web, YouTube/GitHub/RSS, optional social platforms, and a doctor check."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -19,7 +20,19 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
-regex = { workspace = true }
 url = { workspace = true }
-scraper = "0.21"
-futures-util = "0.3"
+scraper = { workspace = true }
+feed-rs = { workspace = true }
+quick-xml = { workspace = true }
+futures-util = { workspace = true }
+base64 = { workspace = true }
+rcgen = { workspace = true }
+tokio-rustls = { workspace = true }
+libc = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = { workspace = true }

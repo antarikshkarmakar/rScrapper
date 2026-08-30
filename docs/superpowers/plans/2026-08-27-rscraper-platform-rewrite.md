@@ -10,6 +10,17 @@
 
 **Spec:** docs/superpowers/specs/2026-08-27-rscraper-platform-rewrite-design.md
 
+## Implementation status
+
+Tasks 1–11 are implemented and independently accepted. Task 12 is executed from
+the frozen-base release brief at
+`.superpowers/sdd/2026-08-27-rscraper-platform-rewrite/task-12-brief.md`, which
+supersedes the older Task 12 command and history instructions below. The release
+checkpoint uses version 0.2.0, Rust 1.88.0, scraper 0.27.0, ego-tree 0.11, and
+rmcp 3.1.4. The implementation worker creates exactly
+`chore: prepare rscraper 0.2 release`; independent approval and final history
+consolidation belong to the controller.
+
 ## Global Constraints
 
 - Preserve the documented CLI commands, HTTP routes, MCP tool names, and existing success-response field names.
@@ -22,7 +33,9 @@
 - Preserve MCP stdout exclusively for protocol messages.
 - Do not implement CAPTCHA solving, anti-bot guarantees, full XPath 1.0, distributed crawling, or attachment downloads.
 - Follow red-green-refactor for every production behavior. Record each focused failing and passing command in the task notes.
-- The user requested one final implementation commit. Use local checkpoint commits while working, then squash implementation checkpoints into one final commit without altering the already-approved specification commit.
+- Preserve reviewed task checkpoints during implementation. Task 12 does not
+  rewrite history; the controller performs the separately requested final
+  consolidation only after independent approval.
 
 ## Verified Dependency Decisions
 
@@ -31,6 +44,8 @@
 - feed-rs 2.4.0 parses Atom, RSS variants, and JSON Feed from raw bytes; pass bytes rather than an already-decoded String.
 - Axum 0.8.9 provides typed JSON extraction and Tower middleware with an MSRV below this project.
 - rmcp 3.1.4 is the current official MCP Rust SDK, supports stdio transport, and requires Rust 1.88.
+- scraper 0.27.0 uses the ego-tree 0.11 line and removes the obsolete fxhash
+  advisory path without selector semantic changes.
 - Do not add a dependency until the task that consumes it has a failing test.
 
 ## Target File Map
@@ -1224,6 +1239,12 @@ Expected: all offline Robin tests pass and help documents both query forms.
 
 ### Task 12: Documentation, CI, migration, audit, and final integration
 
+> **Final execution decision (2026-08-30):** the frozen Task 12 brief expands
+> the checks below to all targets/all features, exact MSRV, executable offline
+> README examples, audit warnings denied, browser-cleanup ownership proof, and
+> the 0.2 dependency/public-surface migration. Steps 8–9 below are historical
+> and are not performed by the Task 12 implementation worker.
+
 **Files:**
 - Replace: README.md
 - Create: SECURITY.md
@@ -1237,11 +1258,11 @@ Expected: all offline Robin tests pass and help documents both query forms.
 - Consumes: all completed public interfaces and commands.
 - Produces: documented 0.2 release and clean repository gates.
 
-- [ ] **Step 1: Write executable documentation checks**
+- [x] **Step 1: Write executable documentation checks**
 
 Create a shell-based or Rust integration test that extracts every local-only CLI command from the README marker blocks and runs help/configuration examples. Add assertions that README does not contain claims for CAPTCHA bypass, invalid-TLS resilience, universal social access, one static binary, or direct fallback from Tor.
 
-- [ ] **Step 2: Verify documentation RED**
+- [x] **Step 2: Verify documentation RED**
 
 Run:
 
@@ -1250,7 +1271,7 @@ Run:
 
 Expected: current README claims and examples fail the new checks.
 
-- [ ] **Step 3: Rewrite user documentation**
+- [x] **Step 3: Rewrite user documentation**
 
 README order:
 
@@ -1269,7 +1290,7 @@ SECURITY.md must document SSRF ranges, redirect/DNS policy, API token/public bin
 
 MIGRATION.md must show old/new FetchClient, Sel::select Result handling, Crawler construction, API bind/token, browser installation, and MSRV 1.88.
 
-- [ ] **Step 4: Add CI**
+- [x] **Step 4: Add CI**
 
 Create one workflow with MSRV 1.88 and stable jobs. Install cargo-audit using a pinned major-compatible version, cache Cargo data, and run:
 
@@ -1281,7 +1302,7 @@ Create one workflow with MSRV 1.88 and stable jobs. Install cargo-audit using a 
 
 Do not configure secrets or live tests.
 
-- [ ] **Step 5: Run full verification**
+- [x] **Step 5: Run full verification**
 
 Run fresh, in this order:
 
@@ -1296,7 +1317,7 @@ Run fresh, in this order:
 
 Read every exit code and count failures. Do not claim completion if any command fails or if cargo audit reports a known vulnerability.
 
-- [ ] **Step 6: Run targeted acceptance proofs**
+- [x] **Step 6: Run targeted acceptance proofs**
 
 Run named tests proving:
 
@@ -1310,7 +1331,7 @@ Run named tests proving:
 
 Run README help examples and verify the API process binds to 127.0.0.1 by default. Verify a non-loopback configuration without token exits nonzero before listening.
 
-- [ ] **Step 7: Review source and repository state**
+- [x] **Step 7: Review source and repository state**
 
     git diff --stat 9b1183d
     git diff --check 9b1183d
@@ -1318,7 +1339,7 @@ Run README help examples and verify the API process binds to 127.0.0.1 by defaul
 
 Confirm only intended source, tests, fixtures, docs, CI, and lockfile changes exist. Confirm no cookie, key, report, browser profile, target artifact, or live response fixture is tracked.
 
-- [ ] **Step 8: Squash implementation checkpoints and commit**
+- [ ] **Step 8: Controller-owned history consolidation (not part of Task 12 implementation)**
 
 Preserve specification commit 9b1183d. Soft-reset only the implementation checkpoint range to 9b1183d after verifying that commit is the immediate base:
 
@@ -1328,7 +1349,7 @@ Preserve specification commit 9b1183d. Soft-reset only the implementation checkp
 
 This reset is scoped to commits created by this plan and preserves the approved specification commit. If unrelated user commits appeared after 9b1183d, do not reset; stop and report the conflict.
 
-- [ ] **Step 9: Verify the final commit**
+- [ ] **Step 9: Controller-owned final-history verification**
 
 Run again after the final commit:
 

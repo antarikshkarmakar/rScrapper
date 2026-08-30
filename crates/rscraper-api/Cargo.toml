@@ -1,8 +1,9 @@
 [package]
 name = "rscraper-api"
-description = "Self-hosted HTTP API: /scrape (URL→Markdown), /search, /crawl — LLM-ready text from anywhere."
+description = "Bounded HTTP API for public-URL scraping, search, and crawling."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -13,11 +14,22 @@ path = "src/main.rs"
 
 [dependencies]
 rscraper-core = { path = "../rscraper-core" }
+rscraper-cli = { path = "../rscraper-cli" }
 tokio = { workspace = true }
-reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 url = { workspace = true }
-scraper = "0.21"
-futures-util = "0.3"
+futures-util = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+subtle = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

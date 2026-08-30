@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Atom</title>
+  <entry>
+    <title><![CDATA[Atom "Title" & More]]></title>
+    <link rel="self" href="/feeds/self-entry"/>
+    <link rel="alternate" href="/articles/atom-entry"/>
+    <summary type="html"><![CDATA[<p>Atom <em>summary</em> &amp; details</p>]]></summary>
+    <updated>2024-09-02T03:04:05Z</updated>
+  </entry>
+  <entry>
+    <updated>2024-09-03T03:04:05Z</updated>
+  </entry>
+</feed>

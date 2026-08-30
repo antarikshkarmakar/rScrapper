@@ -1,0 +1,11 @@
+{
+  "full_name": "acme/widget",
+  "description": "A fixture repository",
+  "stargazers_count": 42,
+  "forks_count": 7,
+  "language": "Rust",
+  "license": { "spdx_id": "MIT" },
+  "open_issues_count": 3,
+  "html_url": "https://github.com/acme/widget",
+  "default_branch": "main"
+}

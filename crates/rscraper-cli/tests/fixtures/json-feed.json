@@ -1,0 +1,19 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "Example JSON Feed",
+  "items": [
+    {
+      "id": "json-one",
+      "url": "/json/one",
+      "title": "JSON Entry",
+      "content_html": "<p>JSON &amp; <strong>HTML</strong></p>",
+      "date_published": "2024-10-03T04:05:06Z"
+    },
+    {
+      "id": "json-two",
+      "url": "/json/two",
+      "title": "Text Entry",
+      "content_text": "Plain text &amp; entities"
+    }
+  ]
+}

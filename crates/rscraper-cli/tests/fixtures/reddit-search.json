@@ -1,0 +1,8 @@
+{
+  "data": {
+    "children": [
+      {"data":{"title":"Rust fixture","permalink":"/r/rust/comments/abc/fixture/","score":123,"author":"ferris","selftext":"A test post"}},
+      {"data":{"title":"Second fixture","permalink":"/r/rust/comments/def/second/","score":5,"author":"crab","selftext":""}}
+    ]
+  }
+}

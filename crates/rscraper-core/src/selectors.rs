@@ -1,19 +1,62 @@
-//! Element selection with two selector dialects and a "memory" layer.
+//! Element selection with CSS selectors, a documented XPath-style subset, and
+//! a lightweight element memory layer.
 //!
-//! * `css`   — full CSS selectors (via the `scraper` crate).
-//! * `xpath` — a practical XPath subset: `//tag`, `[n]`, `[@attr='value']`,
-//!             `contains(@attr,'text')`.
-//!
-//! **Smart memory**: when you select an element we also record a lightweight
-//! *fingerprint* (tag + text snippet + stable attributes). If the site's layout
-//! changes later and your CSS selector stops matching, [`SelectorMemory::find`]
-//! re-locates the same logical element by fingerprint — so one scraper keeps
-//! working across minor redesigns without editing selectors.
+//! CSS selectors are delegated to the `scraper` crate. The XPath-style dialect
+//! intentionally supports only `/` and `//` axes, element names or `*`,
+//! attribute predicates, `contains(@attr, 'text')`, and one-based positions.
 
-use anyhow::Result;
+use crate::{Error, Result};
+use ego_tree::{iter::Edge, NodeId};
 use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+const DEFAULT_MINIMUM_SCORE: f64 = 0.5;
+const TEXT_SNIPPET_CHARS: usize = 80;
+
+#[cfg(test)]
+static CANDIDATE_VISITS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static COVERAGE_WORK: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+fn reset_candidate_visits() {
+    CANDIDATE_VISITS.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn reset_selector_counters() {
+    CANDIDATE_VISITS.store(0, Ordering::Relaxed);
+    COVERAGE_WORK.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn candidate_visits() -> usize {
+    CANDIDATE_VISITS.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+fn coverage_work() -> usize {
+    COVERAGE_WORK.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+fn record_candidate_visit() {
+    CANDIDATE_VISITS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(test))]
+fn record_candidate_visit() {}
+
+#[cfg(test)]
+fn record_coverage_work() {
+    COVERAGE_WORK.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(test))]
+fn record_coverage_work() {}
 
 /// A selector in either dialect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,244 +67,762 @@ pub enum Sel {
 }
 
 impl Sel {
-    /// Parse a string into the right dialect based on its leading characters.
-    pub fn parse(s: &str) -> Self {
-        let t = s.trim();
-        if t.starts_with("//") || t.contains("contains(") {
-            Sel::Xpath(t.to_string())
+    /// Parse and validate a string into the right dialect based on its prefix.
+    pub fn parse(input: &str) -> Result<Self> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err(parse_error(
+                "selector",
+                "selector expression cannot be empty",
+            ));
+        }
+
+        if trimmed.starts_with('/') {
+            parse_xpath(trimmed)?;
+            Ok(Sel::Xpath(trimmed.to_string()))
         } else {
-            Sel::Css(t.to_string())
+            parse_css(trimmed)?;
+            Ok(Sel::Css(trimmed.to_string()))
         }
     }
 
-    /// Select elements from an HTML document. Returned refs borrow from `doc`.
-    pub fn select<'a>(&self, doc: &'a Html) -> Vec<ElementRef<'a>> {
+    /// Select elements from an HTML document. Returned refs borrow from `document`.
+    pub fn select<'a>(&self, document: &'a Html) -> Result<Vec<ElementRef<'a>>> {
         match self {
-            Sel::Css(c) => match Selector::parse(c) {
-                Ok(sel) => doc.select(&sel).collect(),
-                Err(_) => Vec::new(),
-            },
-            Sel::Xpath(x) => xpath_select(doc, x),
-        }
-    }
-
-    /// First matching element's text (trimmed, whitespace collapsed).
-    pub fn first_text<'a>(&self, doc: &'a Html) -> Option<String> {
-        self.select(doc).into_iter().next().map(|e| clean_text(e.text()))
-    }
-}
-
-/// Collapse runs of whitespace and trim.
-pub fn clean_text<'a>(s: impl Iterator<Item = &'a str>) -> String {
-    s.collect::<Vec<_>>().join(" ").split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-// ---------------------------------------------------------------------------
-// XPath subset (operates on ElementRef)
-// ---------------------------------------------------------------------------
-
-/// Evaluate the supported XPath subset against a document.
-fn xpath_select<'a>(doc: &'a Html, expr: &str) -> Vec<ElementRef<'a>> {
-    let steps = split_steps(expr);
-    let mut current: Vec<ElementRef<'a>> = vec![doc.root_element()];
-    for step in steps {
-        if step.is_empty() {
-            continue;
-        }
-        current = apply_step(&current, &step);
-    }
-    // Drop the synthetic root so callers only see real elements.
-    current.into_iter().filter(|e| e.value().name() != "root").collect()
-}
-
-/// Split `//a[@href='x']` into steps: ["a[@href='x']"].
-fn split_steps(expr: &str) -> Vec<String> {
-    let body = expr.trim();
-    let body = body.strip_prefix("//").unwrap_or(body);
-    body.split('/').map(|s| s.to_string()).collect()
-}
-
-/// Apply one step (tag + predicates) to a set of elements.
-fn apply_step<'a>(current: &[ElementRef<'a>], step: &str) -> Vec<ElementRef<'a>> {
-    let (tag, predicates) = split_tag_predicates(step);
-    let tag = tag.trim();
-
-    let mut out: Vec<ElementRef<'a>> = Vec::new();
-    for el in current {
-        let candidates: Vec<ElementRef<'a>> = if tag == "*" || tag.is_empty() {
-            el.descendent_elements().collect()
-        } else {
-            el.descendent_elements().filter(|d| d.value().name() == tag).collect()
-        };
-
-        for c in candidates {
-            if predicates.iter().all(|p| predicate_matches(&c, p)) {
-                out.push(c);
+            Sel::Css(css) => {
+                let selector = parse_css(css)?;
+                Ok(document.select(&selector).collect())
+            }
+            Sel::Xpath(xpath) => {
+                let steps = parse_xpath(xpath)?;
+                Ok(evaluate_xpath(document, &steps))
             }
         }
     }
-    out
+
+    /// First matching element's text, trimmed with whitespace collapsed.
+    pub fn first_text(&self, document: &Html) -> Result<Option<String>> {
+        Ok(self
+            .select(document)?
+            .into_iter()
+            .next()
+            .map(|element| clean_text(element.text())))
+    }
 }
 
-/// Split `a[@href='x'][2]` into tag `a` and its predicates.
-fn split_tag_predicates(step: &str) -> (String, Vec<String>) {
-    let mut tag = String::new();
-    let mut preds = Vec::new();
-    let chars: Vec<char> = step.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '[' {
-            let mut depth = 0usize;
-            let start = i;
-            while i < chars.len() {
-                match chars[i] {
-                    '[' => depth += 1,
+fn parse_css(input: &str) -> Result<Selector> {
+    Selector::parse(input).map_err(|error| parse_error("css", format!("{error:?}")))
+}
+
+fn parse_error(kind: &'static str, message: impl Into<String>) -> Error {
+    Error::Parse {
+        kind,
+        message: message.into(),
+    }
+}
+
+/// Collapse runs of Unicode whitespace and trim.
+pub fn clean_text<'a>(text: impl Iterator<Item = &'a str>) -> String {
+    text.collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    Child,
+    Descendant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NodeTest {
+    Any,
+    Name(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Predicate {
+    AttrExists(String),
+    AttrEquals { name: String, value: String },
+    AttrContains { name: String, needle: String },
+    Position(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Step {
+    axis: Axis,
+    node_test: NodeTest,
+    predicates: Vec<Predicate>,
+}
+
+fn parse_xpath(input: &str) -> Result<Vec<Step>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(parse_error("xpath", "xpath expression cannot be empty"));
+    }
+    if !trimmed.starts_with('/') {
+        return Err(parse_error(
+            "xpath",
+            "xpath expression must start with '/' or '//'",
+        ));
+    }
+
+    tokenize_xpath(trimmed)?
+        .into_iter()
+        .map(|(axis, step)| parse_step(axis, &step))
+        .collect()
+}
+
+fn tokenize_xpath(input: &str) -> Result<Vec<(Axis, String)>> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut steps = Vec::new();
+    let mut index = 0;
+
+    while index < chars.len() {
+        if chars[index] != '/' {
+            return Err(parse_error("xpath", "expected step separator"));
+        }
+
+        let axis = if chars.get(index + 1) == Some(&'/') {
+            index += 2;
+            Axis::Descendant
+        } else {
+            index += 1;
+            Axis::Child
+        };
+
+        if index >= chars.len() {
+            return Err(parse_error("xpath", "missing step after separator"));
+        }
+
+        let start = index;
+        let mut bracket_depth = 0usize;
+        let mut quote = None;
+
+        while index < chars.len() {
+            let current = chars[index];
+
+            if let Some(quote_char) = quote {
+                if current == quote_char {
+                    quote = None;
+                }
+            } else {
+                match current {
+                    '\'' | '"' => quote = Some(current),
+                    '[' => bracket_depth += 1,
                     ']' => {
-                        depth -= 1;
-                        if depth == 0 {
+                        if bracket_depth == 0 {
+                            return Err(parse_error("xpath", "unexpected closing bracket"));
+                        }
+                        bracket_depth -= 1;
+                    }
+                    '/' if bracket_depth == 0 => break,
+                    _ => {}
+                }
+            }
+
+            index += 1;
+        }
+
+        if quote.is_some() {
+            return Err(parse_error("xpath", "unclosed quoted string"));
+        }
+        if bracket_depth != 0 {
+            return Err(parse_error("xpath", "unclosed predicate bracket"));
+        }
+
+        let step = chars[start..index]
+            .iter()
+            .collect::<String>()
+            .trim()
+            .to_string();
+        if step.is_empty() {
+            return Err(parse_error("xpath", "missing step after separator"));
+        }
+        steps.push((axis, step));
+    }
+
+    if steps.is_empty() {
+        return Err(parse_error("xpath", "xpath expression has no steps"));
+    }
+
+    Ok(steps)
+}
+
+fn parse_step(axis: Axis, input: &str) -> Result<Step> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut node_end = 0;
+
+    while node_end < chars.len() && chars[node_end] != '[' {
+        node_end += 1;
+    }
+
+    let node_name = chars[..node_end]
+        .iter()
+        .collect::<String>()
+        .trim()
+        .to_string();
+    let node_test = parse_node_test(&node_name)?;
+    let mut predicates = Vec::new();
+    let mut index = node_end;
+
+    while index < chars.len() {
+        if chars[index] != '[' {
+            return Err(parse_error(
+                "xpath",
+                "unexpected characters after node test",
+            ));
+        }
+
+        let predicate_start = index + 1;
+        index += 1;
+        let mut bracket_depth = 1usize;
+        let mut quote = None;
+
+        while index < chars.len() {
+            let current = chars[index];
+            if let Some(quote_char) = quote {
+                if current == quote_char {
+                    quote = None;
+                }
+            } else {
+                match current {
+                    '\'' | '"' => quote = Some(current),
+                    '[' => bracket_depth += 1,
+                    ']' => {
+                        bracket_depth -= 1;
+                        if bracket_depth == 0 {
                             break;
                         }
                     }
                     _ => {}
                 }
-                i += 1;
             }
-            preds.push(chars[start..=i].iter().collect());
-        } else {
-            tag.push(chars[i]);
+            index += 1;
         }
-        i += 1;
+
+        if quote.is_some() {
+            return Err(parse_error("xpath", "unclosed quoted string"));
+        }
+        if index >= chars.len() || bracket_depth != 0 {
+            return Err(parse_error("xpath", "unclosed predicate bracket"));
+        }
+
+        let body = chars[predicate_start..index].iter().collect::<String>();
+        predicates.push(parse_predicate(body.trim())?);
+        index += 1;
     }
-    (tag, preds)
+
+    Ok(Step {
+        axis,
+        node_test,
+        predicates,
+    })
 }
 
-/// Evaluate a single predicate like `@href='x'`, `contains(@href,'y')`, or `2`.
-fn predicate_matches<'a>(el: &'a ElementRef<'a>, pred: &str) -> bool {
-    let p = pred.trim().trim_start_matches('[').trim_end_matches(']');
+fn parse_node_test(input: &str) -> Result<NodeTest> {
+    if input == "*" {
+        return Ok(NodeTest::Any);
+    }
+    if input.is_empty() {
+        return Err(parse_error("xpath", "step is missing an element name"));
+    }
+    if input
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':'))
+    {
+        Ok(NodeTest::Name(input.to_ascii_lowercase()))
+    } else {
+        Err(parse_error(
+            "xpath",
+            format!("unsupported node test '{input}'"),
+        ))
+    }
+}
 
-    if let Ok(n) = p.parse::<usize>() {
-        // Positional (1-based): best-effort — accept the element if it's not root.
-        return n >= 1 && el.value().name() != "root";
+fn parse_predicate(input: &str) -> Result<Predicate> {
+    if input.is_empty() {
+        return Err(parse_error("xpath", "predicate cannot be empty"));
     }
 
-    if let Some(inner) = p.strip_prefix("contains(") {
-        let inner = inner.trim_end_matches(')');
-        let parts: Vec<&str> = inner.split(',').map(|s| s.trim().trim_matches('"').trim_matches('\'')).collect();
-        if parts.len() == 2 && parts[0].starts_with('@') {
-            let attr = &parts[0][1..];
-            return el.value().attr(attr).is_some_and(|v| v.contains(parts[1]));
+    if input.chars().all(|ch| ch.is_ascii_digit()) {
+        let position = input
+            .parse::<usize>()
+            .map_err(|_| parse_error("xpath", "position predicate is out of range"))?;
+        if position == 0 {
+            return Err(parse_error("xpath", "position predicate is one-based"));
         }
-        return false;
+        return Ok(Predicate::Position(position));
     }
 
-    if let Some(attr) = p.strip_prefix("@") {
-        match attr.split_once('=') {
-            Some((name, val)) => {
-                let name = name.trim();
-                let val = val.trim().trim_matches('"').trim_matches('\'');
-                el.value().attr(name).is_some_and(|v| v == val)
+    if let Some(rest) = input.strip_prefix('@') {
+        return parse_attribute_predicate(rest);
+    }
+
+    if let Some(rest) = input.strip_prefix("contains(") {
+        return parse_contains_predicate(rest);
+    }
+
+    Err(parse_error(
+        "xpath",
+        format!("unsupported predicate '{input}'"),
+    ))
+}
+
+fn parse_attribute_predicate(input: &str) -> Result<Predicate> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(parse_error("xpath", "attribute name cannot be empty"));
+    }
+
+    let Some(equals_index) = find_unquoted_char(trimmed, '=') else {
+        return validate_attribute_name(trimmed).map(Predicate::AttrExists);
+    };
+
+    let name = trimmed[..equals_index].trim();
+    validate_attribute_name(name)?;
+    let value = parse_quoted_literal(trimmed[equals_index + 1..].trim())?;
+
+    Ok(Predicate::AttrEquals {
+        name: name.to_string(),
+        value,
+    })
+}
+
+fn parse_contains_predicate(input: &str) -> Result<Predicate> {
+    let trimmed = input.trim();
+    if !trimmed.ends_with(')') {
+        return Err(parse_error("xpath", "contains predicate is missing ')'"));
+    }
+
+    let inner = trimmed[..trimmed.len() - 1].trim();
+    let comma_index = find_unquoted_char(inner, ',')
+        .ok_or_else(|| parse_error("xpath", "contains predicate requires two arguments"))?;
+    let attr_arg = inner[..comma_index].trim();
+    let value_arg = inner[comma_index + 1..].trim();
+    let attr_name = attr_arg
+        .strip_prefix('@')
+        .ok_or_else(|| parse_error("xpath", "contains first argument must be @attribute"))?;
+    let attr_name = validate_attribute_name(attr_name.trim())?;
+    let needle = parse_quoted_literal(value_arg)?;
+
+    Ok(Predicate::AttrContains {
+        name: attr_name,
+        needle,
+    })
+}
+
+fn find_unquoted_char(input: &str, target: char) -> Option<usize> {
+    let mut quote = None;
+    for (index, current) in input.char_indices() {
+        if let Some(quote_char) = quote {
+            if current == quote_char {
+                quote = None;
             }
-            None => false,
+        } else if matches!(current, '\'' | '"') {
+            quote = Some(current);
+        } else if current == target {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn validate_attribute_name(input: &str) -> Result<String> {
+    let name = input.trim();
+    if name.is_empty() {
+        return Err(parse_error("xpath", "attribute name cannot be empty"));
+    }
+    if name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':'))
+    {
+        Ok(name.to_ascii_lowercase())
+    } else {
+        Err(parse_error(
+            "xpath",
+            format!("unsupported attribute name '{name}'"),
+        ))
+    }
+}
+
+fn parse_quoted_literal(input: &str) -> Result<String> {
+    let trimmed = input.trim();
+    let mut chars = trimmed.char_indices();
+    let Some((_, quote_char @ ('\'' | '"'))) = chars.next() else {
+        return Err(parse_error("xpath", "attribute value must be quoted"));
+    };
+
+    for (index, current) in chars {
+        if current == quote_char {
+            if trimmed[index + current.len_utf8()..].trim().is_empty() {
+                return Ok(trimmed[quote_char.len_utf8()..index].to_string());
+            }
+            return Err(parse_error(
+                "xpath",
+                "unexpected characters after quoted literal",
+            ));
+        }
+    }
+
+    Err(parse_error("xpath", "unclosed quoted string"))
+}
+
+fn evaluate_xpath<'a>(document: &'a Html, steps: &[Step]) -> Vec<ElementRef<'a>> {
+    let document_root = document.root_element();
+    let mut current = vec![document_root];
+
+    for (index, step) in steps.iter().enumerate() {
+        current = evaluate_step(document_root, &current, step, index == 0);
+    }
+
+    current
+}
+
+fn evaluate_step<'a>(
+    document_root: ElementRef<'a>,
+    current: &[ElementRef<'a>],
+    step: &Step,
+    first_step: bool,
+) -> Vec<ElementRef<'a>> {
+    let position_predicates: Vec<usize> = step
+        .predicates
+        .iter()
+        .filter_map(|predicate| match predicate {
+            Predicate::Position(position) => Some(*position),
+            _ => None,
+        })
+        .collect();
+    let non_position_predicates: Vec<&Predicate> = step
+        .predicates
+        .iter()
+        .filter(|predicate| !matches!(predicate, Predicate::Position(_)))
+        .collect();
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+
+    if first_step && step.axis == Axis::Child {
+        for element in current {
+            record_coverage_work();
+            push_candidate(
+                &mut candidates,
+                &mut seen,
+                *element,
+                step,
+                &non_position_predicates,
+            );
         }
     } else {
-        true
+        let context_ids = current
+            .iter()
+            .map(|element| element.id())
+            .collect::<HashSet<_>>();
+        let mut active_context_depth = 0usize;
+
+        for edge in document_root.traverse() {
+            match edge {
+                Edge::Open(node) => {
+                    let Some(element) = ElementRef::wrap(node) else {
+                        continue;
+                    };
+                    record_coverage_work();
+
+                    let is_context = context_ids.contains(&element.id());
+                    let is_candidate = match step.axis {
+                        Axis::Child => is_child_of_any_context(&element, &context_ids),
+                        Axis::Descendant if first_step => true,
+                        Axis::Descendant => active_context_depth > 0,
+                    };
+
+                    if is_candidate {
+                        push_candidate(
+                            &mut candidates,
+                            &mut seen,
+                            element,
+                            step,
+                            &non_position_predicates,
+                        );
+                    }
+
+                    if is_context {
+                        active_context_depth += 1;
+                    }
+                }
+                Edge::Close(node) => {
+                    if let Some(element) = ElementRef::wrap(node) {
+                        if context_ids.contains(&element.id()) {
+                            active_context_depth = active_context_depth.saturating_sub(1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for position in position_predicates {
+        candidates = candidates.get(position - 1).copied().into_iter().collect();
+    }
+
+    candidates
+}
+
+fn is_child_of_any_context(element: &ElementRef<'_>, context_ids: &HashSet<NodeId>) -> bool {
+    element
+        .parent()
+        .and_then(ElementRef::wrap)
+        .is_some_and(|parent| context_ids.contains(&parent.id()))
+}
+
+fn push_candidate<'a>(
+    candidates: &mut Vec<ElementRef<'a>>,
+    seen: &mut HashSet<NodeId>,
+    element: ElementRef<'a>,
+    step: &Step,
+    non_position_predicates: &[&Predicate],
+) {
+    record_candidate_visit();
+    if node_matches(&step.node_test, &element)
+        && non_position_predicates
+            .iter()
+            .all(|predicate| predicate_matches(&element, predicate))
+        && seen.insert(element.id())
+    {
+        candidates.push(element);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Smart element memory
-// ---------------------------------------------------------------------------
+fn node_matches(node_test: &NodeTest, element: &ElementRef<'_>) -> bool {
+    match node_test {
+        NodeTest::Any => true,
+        NodeTest::Name(name) => element.value().name().eq_ignore_ascii_case(name),
+    }
+}
+
+fn predicate_matches(element: &ElementRef<'_>, predicate: &Predicate) -> bool {
+    match predicate {
+        Predicate::AttrExists(name) => element.value().attr(name).is_some(),
+        Predicate::AttrEquals { name, value } => element.value().attr(name) == Some(value.as_str()),
+        Predicate::AttrContains { name, needle } => element
+            .value()
+            .attr(name)
+            .is_some_and(|value| value.contains(needle)),
+        Predicate::Position(_) => true,
+    }
+}
 
 /// A stable-ish fingerprint of an element used to re-find it after layout changes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fingerprint {
+    /// Normalized HTML tag name.
     pub tag: String,
-    /// First ~80 chars of visible text (normalized).
+    /// First visible text characters after Unicode whitespace normalization.
     pub text_snippet: String,
-    /// Stable attributes worth keying on (id, data-*, class tokens).
+    /// Stable attributes worth keying on: id, data-* attributes, and classes.
     pub attrs: HashMap<String, String>,
 }
 
 impl Fingerprint {
-    fn from_element(el: &ElementRef) -> Self {
+    fn from_element(element: &ElementRef<'_>) -> Self {
         let mut attrs = HashMap::new();
-        if let Some(id) = el.value().attr("id") {
-            attrs.insert("id".into(), id.into());
-        }
-        for (k, v) in el.value().attrs() {
-            if k.starts_with("data-") || k == "class" {
-                attrs.insert(k.to_string(), v.to_string());
+        for (name, value) in element.value().attrs() {
+            if matches!(name, "id" | "class") || name.starts_with("data-") {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    attrs.insert(name.to_string(), trimmed.to_string());
+                }
             }
         }
-        let text = clean_text(el.text()).chars().take(80).collect();
-        Fingerprint { tag: el.value().name().to_string(), text_snippet: text, attrs }
+
+        let text_snippet = clean_text(element.text())
+            .chars()
+            .take(TEXT_SNIPPET_CHARS)
+            .collect();
+
+        Self {
+            tag: element.value().name().to_string(),
+            text_snippet,
+            attrs,
+        }
     }
 
-    /// How well does this fingerprint match an element? 1.0 = strong, 0.0 = none.
-    fn score(&self, el: &ElementRef) -> f64 {
-        let mut s = 0.0f64;
-        if el.value().name() == self.tag {
-            s += 0.3;
+    /// How well this fingerprint matches an element. 1.0 is strongest.
+    fn score(&self, element: &ElementRef<'_>) -> f64 {
+        if !element.value().name().eq_ignore_ascii_case(&self.tag) {
+            return 0.0;
         }
-        for (k, v) in &self.attrs {
-            if k == "id" && el.value().attr(k).is_some_and(|x| x == v) {
-                return 1.0; // id match is decisive
-            }
-            if el.value().attr(k).is_some_and(|x| x.contains(v)) {
-                s += 0.25;
+
+        let mut score = 0.2;
+        if let Some(id) = self.attrs.get("id") {
+            if element.value().attr("id") == Some(id.as_str()) {
+                score += 0.45;
             }
         }
-        let el_text = clean_text(el.text());
-        if !self.text_snippet.is_empty() && el_text.starts_with(&self.text_snippet) {
-            s += 0.4;
+
+        for (name, value) in self
+            .attrs
+            .iter()
+            .filter(|(name, _)| name.starts_with("data-"))
+        {
+            if element.value().attr(name) == Some(value.as_str()) {
+                score += 0.2;
+            }
         }
-        s.min(1.0)
+
+        score += self.class_score(element) * 0.2;
+
+        let element_text = clean_text(element.text());
+        if !self.text_snippet.is_empty() && element_text.starts_with(&self.text_snippet) {
+            score += 0.35;
+        }
+
+        score.min(1.0)
     }
+
+    fn class_score(&self, element: &ElementRef<'_>) -> f64 {
+        let Some(stored_class) = self.attrs.get("class") else {
+            return 0.0;
+        };
+        let stored_tokens = class_tokens(stored_class);
+        if stored_tokens.is_empty() {
+            return 0.0;
+        }
+
+        let element_tokens = element
+            .value()
+            .attr("class")
+            .map(class_tokens)
+            .unwrap_or_default();
+        let overlap = stored_tokens
+            .iter()
+            .filter(|token| element_tokens.contains(*token))
+            .count();
+
+        overlap as f64 / stored_tokens.len() as f64
+    }
+}
+
+fn class_tokens(input: &str) -> HashSet<&str> {
+    input.split_whitespace().collect()
 }
 
 /// Remembers selected elements so they can be re-found after a site redesign.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SelectorMemory {
     /// Named fingerprints: `name -> fingerprint`.
     pub entries: HashMap<String, Fingerprint>,
+    /// Minimum score required for a fallback match.
+    #[serde(default = "default_minimum_score")]
+    pub minimum_score: f64,
+}
+
+impl Default for SelectorMemory {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            minimum_score: DEFAULT_MINIMUM_SCORE,
+        }
+    }
+}
+
+fn default_minimum_score() -> f64 {
+    DEFAULT_MINIMUM_SCORE
 }
 
 impl SelectorMemory {
+    /// Create empty memory with the default minimum match score.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Remember the first element matched by `sel` under a stable `name`.
-    pub fn remember(&mut self, name: &str, sel: &Sel, doc: &Html) -> Option<()> {
-        let el = sel.select(doc).into_iter().next()?;
-        self.entries.insert(name.to_string(), Fingerprint::from_element(&el));
+    /// Remember the first element matched by `selector` under a stable `name`.
+    pub fn remember(&mut self, name: &str, selector: &Sel, document: &Html) -> Option<()> {
+        let element = selector.select(document).ok()?.into_iter().next()?;
+        self.entries
+            .insert(name.to_string(), Fingerprint::from_element(&element));
         Some(())
     }
 
-    /// Re-find a remembered element in a (possibly redesigned) document.
-    pub fn find<'a>(&self, name: &str, doc: &'a Html) -> Option<ElementRef<'a>> {
-        let fp = self.entries.get(name)?;
+    /// Re-find a remembered element in a possibly redesigned document.
+    pub fn find<'a>(&self, name: &str, document: &'a Html) -> Option<ElementRef<'a>> {
+        if !self.minimum_score.is_finite() {
+            return None;
+        }
 
-        let mut best: Option<(f64, ElementRef<'a>)> = None;
-        for el in doc.root_element().descendent_elements() {
-            if el.value().name() != fp.tag {
-                continue;
-            }
-            let score = fp.score(&el);
-            if score >= 0.5 && best.as_ref().map(|(b, _)| score > *b).unwrap_or(true) {
-                best = Some((score, el));
+        let fingerprint = self.entries.get(name)?;
+        let mut best = None;
+
+        for element in std::iter::once(document.root_element())
+            .chain(document.root_element().descendent_elements())
+            .filter(|element| {
+                element
+                    .value()
+                    .name()
+                    .eq_ignore_ascii_case(&fingerprint.tag)
+            })
+        {
+            let score = fingerprint.score(&element);
+            if score >= self.minimum_score
+                && best
+                    .as_ref()
+                    .is_none_or(|(best_score, _): &(f64, ElementRef<'a>)| score > *best_score)
+            {
+                best = Some((score, element));
             }
         }
-        best.map(|(_, e)| e)
+
+        best.map(|(_, element)| element)
     }
 
-    /// Serialize to JSON for persistence across runs (optional).
-    pub fn to_json(&self) -> Result<String> {
-        Ok(serde_json::to_string(self)?)
+    /// Serialize to stable JSON for persistence across runs.
+    pub fn to_json(&self) -> anyhow::Result<String> {
+        if !self.minimum_score.is_finite() {
+            anyhow::bail!("minimum_score must be finite");
+        }
+
+        #[derive(Serialize)]
+        struct StableFingerprint<'a> {
+            tag: &'a str,
+            text_snippet: &'a str,
+            attrs: BTreeMap<&'a str, &'a str>,
+        }
+
+        #[derive(Serialize)]
+        struct StableMemory<'a> {
+            entries: BTreeMap<&'a str, StableFingerprint<'a>>,
+            minimum_score: f64,
+        }
+
+        let entries = self
+            .entries
+            .iter()
+            .map(|(name, fingerprint)| {
+                let attrs = fingerprint
+                    .attrs
+                    .iter()
+                    .map(|(attr_name, value)| (attr_name.as_str(), value.as_str()))
+                    .collect();
+                (
+                    name.as_str(),
+                    StableFingerprint {
+                        tag: &fingerprint.tag,
+                        text_snippet: &fingerprint.text_snippet,
+                        attrs,
+                    },
+                )
+            })
+            .collect();
+
+        Ok(serde_json::to_string(&StableMemory {
+            entries,
+            minimum_score: self.minimum_score,
+        })?)
     }
 
-    pub fn from_json(s: &str) -> Result<Self> {
-        Ok(serde_json::from_str(s)?)
+    /// Deserialize selector memory from JSON.
+    pub fn from_json(input: &str) -> anyhow::Result<Self> {
+        Ok(serde_json::from_str(input)?)
     }
 }
 
@@ -269,54 +830,82 @@ impl SelectorMemory {
 mod tests {
     use super::*;
 
-    const DOC: &str = r#"
-      <html><body>
-        <div class="product" id="p1"><h2>Widget</h2><span class="price">$9.99</span></div>
-        <a href="/cart">Add to cart</a>
-      </body></html>"#;
+    fn nested_div_chain(depth: usize) -> String {
+        let mut html = String::from("<html><body>");
+        for index in 0..depth {
+            html.push_str(&format!("<div id=\"d{index}\">"));
+        }
+        html.push_str("<span id=\"target\">leaf</span>");
+        for _ in 0..depth {
+            html.push_str("</div>");
+        }
+        html.push_str("</body></html>");
+        html
+    }
 
-    #[test]
-    fn css_selects_price() {
-        let doc = Html::parse_fragment(DOC);
-        let sel = Sel::Css(".price".into());
-        assert_eq!(sel.first_text(&doc).as_deref(), Some("$9.99"));
+    fn sibling_divs(width: usize) -> String {
+        let mut html = String::from("<html><body>");
+        for index in 0..width {
+            html.push_str(&format!(
+                "<div id=\"d{index}\"><span id=\"s{index}\">leaf</span></div>"
+            ));
+        }
+        html.push_str("</body></html>");
+        html
     }
 
     #[test]
-    fn xpath_attribute_predicate() {
-        let doc = Html::parse_fragment(DOC);
-        let sel = Sel::Xpath("//div[@id='p1']".into());
-        assert_eq!(sel.select(&doc).len(), 1);
+    fn descendant_axis_prunes_covered_nested_contexts_before_traversal() {
+        let depth = 64;
+        let document = Html::parse_document(&nested_div_chain(depth));
+
+        reset_candidate_visits();
+        let matches = Sel::parse("//div//span")
+            .unwrap()
+            .select(&document)
+            .unwrap();
+        let visits = candidate_visits();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].value().attr("id"), Some("target"));
+        assert!(
+            visits <= depth * 4,
+            "descendant-axis evaluation visited {visits} candidates for depth {depth}"
+        );
     }
 
     #[test]
-    fn xpath_contains() {
-        let doc = Html::parse_fragment(DOC);
-        let sel = Sel::Xpath("//a[contains(@href,'cart')]".into());
-        assert_eq!(sel.first_text(&doc).as_deref(), Some("Add to cart"));
-    }
+    fn context_pruning_coverage_work_is_linear_for_nested_and_disjoint_contexts() {
+        let depth = 128;
+        let nested_document = Html::parse_document(&nested_div_chain(depth));
 
-    #[test]
-    fn memory_refinds_after_layout_change() {
-        // Remember a price element by name in the original layout.
-        let doc1 = Html::parse_fragment(DOC);
-        let mut mem = SelectorMemory::new();
-        mem.remember("price", &Sel::Css(".price".into()), &doc1).unwrap();
+        reset_selector_counters();
+        let nested_matches = Sel::parse("//div//span")
+            .unwrap()
+            .select(&nested_document)
+            .unwrap();
+        let nested_work = coverage_work();
 
-        // Redesigned layout: the `.price` class is gone (so the CSS selector no
-        // longer matches), but the element keeps its tag + visible text. The
-        // fingerprint should still re-find it.
-        let doc2 = Html::parse_fragment("<html><body><div class=\"product-v2\"><span class=\"cost\">$9.99</span></div></body></html>");
-        assert!(mem.find("price", &doc2).is_some());
-    }
+        assert_eq!(nested_matches.len(), 1);
+        assert!(
+            nested_work <= depth * 6,
+            "nested context pruning did {nested_work} coverage units for depth {depth}"
+        );
 
-    #[test]
-    fn memory_roundtrips_json() {
-        let doc = Html::parse_fragment(DOC);
-        let mut mem = SelectorMemory::new();
-        mem.remember("x", &Sel::Css(".price".into()), &doc).unwrap();
-        let json = mem.to_json().unwrap();
-        let back = SelectorMemory::from_json(&json).unwrap();
-        assert!(back.entries.contains_key("x"));
+        let width = 2_048;
+        let disjoint_document = Html::parse_document(&sibling_divs(width));
+
+        reset_selector_counters();
+        let disjoint_matches = Sel::parse("//div/*")
+            .unwrap()
+            .select(&disjoint_document)
+            .unwrap();
+        let disjoint_work = coverage_work();
+
+        assert_eq!(disjoint_matches.len(), width);
+        assert!(
+            disjoint_work <= width * 6,
+            "disjoint context pruning did {disjoint_work} coverage units for width {width}"
+        );
     }
 }

@@ -1,0 +1,67 @@
+<!doctype html>
+<html>
+  <head><title>Fixture</title></head>
+  <body>
+    <script nonce="test">
+      window["ytInitialPlayerResponse"] = {
+        "videoDetails": {
+          "title": "A video with an escaped quote: \"yes\""
+        },
+        "captions": {
+          "playerCaptionsTracklistRenderer": {
+            "captionTracks": [
+              {
+                "baseUrl": "https://www.youtube.com/api/timedtext?v=abc_def-123\u0026lang=en\u0026name=English%20%22Main%22",
+                "languageCode": "en",
+                "name": {"simpleText": "English \"Main\""}
+              },
+              {
+                "baseUrl": "https://www.youtube.com/api/timedtext?v=abc_def-123\u0026lang=en\u0026kind=asr",
+                "languageCode": "en",
+                "kind": "asr",
+                "name": {"runs": [{"text": "English "}, {"text": "auto"}]}
+              },
+              {
+                "baseUrl": "https://www.youtube.com/api/timedtext?v=abc_def-123\u0026lang=fr",
+                "languageCode": "fr",
+                "name": {"simpleText": "Francais"}
+              }
+            ]
+          }
+        }
+      };
+    </script>
+    <script>
+      var ytInitialData = {
+        "contents": {
+          "twoColumnSearchResultsRenderer": {
+            "primaryContents": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "itemSectionRenderer": {
+                      "contents": [
+                        {
+                          "videoRenderer": {
+                            "videoId": "abc_def-123",
+                            "title": {"simpleText": "Escaped \u2603 \"Title\""}
+                          }
+                        },
+                        {
+                          "videoRenderer": {
+                            "videoId": "ZYXWVUT9876",
+                            "title": {"runs": [{"text": "Runs "}, {"text": "Title"}]}
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      };
+    </script>
+  </body>
+</html>

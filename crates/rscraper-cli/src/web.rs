@@ -1,213 +1,394 @@
-//! Web reading and searching — no paid APIs, with built-in fallbacks.
+//! Typed web reading and search services.
 
-use crate::{rss, youtube};
-use anyhow::{anyhow, Context, Result};
-use rscraper_core::fetch::{self, FetchMode, FetchOptions, Page};
-use rscraper_core::html_to_markdown;
-use scraper::{Html, Selector};
-use serde_json::json;
+use crate::context::AppContext;
+use anyhow::Result as AnyResult;
+use futures_util::{stream, StreamExt};
+use rscraper_core::markdown::{html_to_markdown_with_options, MarkdownOptions};
+use rscraper_core::{truncate_chars, Error, FetchRequest, FetchVia, Result};
+use scraper::{ElementRef, Html, Selector};
+use serde::Serialize;
+use url::Url;
 
-/// Build a reqwest client with a realistic UA (shared across the CLI).
-pub fn http_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-        .danger_accept_invalid_certs(true)
-        .build()?)
+pub const DEFAULT_SEARCH_RESULTS: usize = 5;
+pub const MAX_SEARCH_RESULTS: usize = 20;
+const MAX_QUERY_CHARS: usize = 1_024;
+const MAX_TITLE_CHARS: usize = 512;
+const MAX_SNIPPET_CHARS: usize = 4_096;
+const SCRAPE_CONCURRENCY: usize = 4;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadResponse {
+    pub url: Url,
+    pub status: u16,
+    pub via: &'static str,
+    pub markdown: String,
 }
 
-/// A single search result.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
     pub title: String,
-    pub url: String,
+    pub url: Url,
     pub snippet: String,
+    pub markdown: Option<String>,
+    pub scrape_error: Option<String>,
 }
 
-/// Read a URL and return clean Markdown.
-pub async fn read(url: &str, json_out: bool) -> Result<()> {
-    let page = fetch::fetch(url, &FetchOptions::new().mode(FetchMode::Auto)).await?;
-    if (page.status as u16) >= 400 && page.html.trim().is_empty() {
-        return Err(anyhow!("HTTP {} for {url}", page.status));
-    }
-    let md = html_to_markdown(&page.html);
-    emit(json_out, &json!({ "url": page.url, "status": page.status, "via": page.via, "markdown": md }), &md)
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchResponse {
+    pub query: String,
+    pub count: usize,
+    pub results: Vec<SearchHit>,
+    pub provider: &'static str,
+    pub fallback_warning: Option<String>,
 }
 
-/// Web search with DuckDuckGo primary and Bing fallback.
-pub async fn search(query: &str, n: usize, scrape: bool, json_out: bool) -> Result<()> {
-    let mut hits = ddg_search(query, n).await.unwrap_or_default();
-    if hits.is_empty() {
-        eprintln!("(DuckDuckGo returned nothing — trying Bing fallback…)");
-        hits = bing_search(query, n).await.unwrap_or_default();
-    }
-
-    let mut results: Vec<serde_json::Value> = Vec::new();
-    for h in &hits {
-        let mut obj = json!({ "title": h.title, "url": h.url, "snippet": h.snippet });
-        if scrape {
-            match read_page_markdown(&h.url).await {
-                Ok(md) => {
-                    obj["markdown"] = json!(md);
-                }
-                Err(_) => {} // keep the hit even if its page can't be cleaned
-            }
-        }
-        results.push(obj);
-    }
-
-    let text = render_hits(&hits, scrape);
-    emit(json_out, &json!({ "query": query, "count": hits.len(), "results": results }), &text)
+#[derive(Debug, Clone)]
+pub struct SearchEndpoints {
+    pub duckduckgo: Url,
+    pub bing: Url,
 }
 
-async fn read_page_markdown(url: &str) -> Result<String> {
-    let page = fetch::fetch(url, &FetchOptions::new().mode(FetchMode::Auto)).await?;
-    Ok(html_to_markdown(&page.html))
-}
-
-/// DuckDuckGo HTML endpoint (no API key).
-async fn ddg_search(query: &str, n: usize) -> Result<Vec<SearchHit>> {
-    let client = http_client()?;
-    let url = format!("https://html.duckduckgo.com/html/?q={}", urlencode(query));
-    let html = client.get(&url).send().await?.text().await?;
-
-    let doc = Html::parse_fragment(&html);
-    let a_sel = Selector::parse("a.result__a").unwrap();
-    let snip_sel = Selector::parse(".result__snippet").unwrap();
-
-    let mut out = Vec::new();
-    for (i, el) in doc.select(&a_sel).enumerate() {
-        if i >= n {
-            break;
-        }
-        let href = el.value().attr("href").unwrap_or_default().to_string();
-        let real_url = unwrap_ddg_redirect(&href);
-        let title = el.text().collect::<String>();
-        // Snippet is a sibling in the same result row.
-        let snippet = doc.select(&snip_sel).nth(i).map(|s| s.text().collect::<String>()).unwrap_or_default();
-        out.push(SearchHit { title: clean(title), url: real_url, snippet: clean(snippet) });
-    }
-    Ok(out)
-}
-
-/// Bing HTML endpoint (fallback).
-async fn bing_search(query: &str, n: usize) -> Result<Vec<SearchHit>> {
-    let client = http_client()?;
-    let url = format!("https://www.bing.com/search?q={}&count={}", urlencode(query), n);
-    let html = client.get(&url).send().await?.text().await?;
-
-    let doc = Html::parse_fragment(&html);
-    let sel = Selector::parse("li.b_algo h2 a").unwrap();
-
-    // Bing lists results and their snippets in the same order, so we pair by index.
-    let snip_sel = Selector::parse(".b_caption p").unwrap();
-    let snippets: Vec<String> = doc.select(&snip_sel).map(|p| clean(p.text().collect::<String>())).collect();
-
-    let mut out = Vec::new();
-    for (i, el) in doc.select(&sel).enumerate() {
-        if out.len() >= n {
-            break;
-        }
-        let href = el.value().attr("href").unwrap_or_default().to_string();
-        let title = clean(el.text().collect::<String>());
-        let snippet = snippets.get(i).cloned().unwrap_or_default();
-        out.push(SearchHit { title, url: href, snippet });
-    }
-    Ok(out)
-}
-
-/// DuckDuckGo wraps result URLs in a redirect; extract the real target.
-fn unwrap_ddg_redirect(href: &str) -> String {
-    if let Some(pos) = href.find("uddg=") {
-        let rest = &href[pos + 5..];
-        let end = rest.find('&').unwrap_or(rest.len());
-        return percent_decode(&rest[..end]);
-    }
-    href.to_string()
-}
-
-/// Smart router: detect what the target is and dispatch.
-pub async fn smart_get(target: &str, n: usize, json_out: bool) -> Result<()> {
-    let t = target.trim();
-
-    // YouTube video?
-    if let Some(id) = youtube::extract_video_id(t) {
-        return youtube::subs(&id, json_out).await;
-    }
-    // RSS/Atom feed?
-    if is_feed_url(t) || rss::looks_like_feed(t) {
-        return rss::parse(t, json_out).await;
-    }
-    // A full URL → read it.
-    if t.starts_with("http://") || t.starts_with("https://") {
-        return read(t, json_out).await;
-    }
-    // Otherwise treat as a search query.
-    search(t, n, false, json_out).await
-}
-
-fn is_feed_url(url: &str) -> bool {
-    let lower = url.to_lowercase();
-    lower.contains("/rss") || lower.contains("/feed") || lower.ends_with(".xml") || lower.contains("atom.xml")
-}
-
-// ---- small helpers -------------------------------------------------------
-
-pub fn clean(s: String) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-pub fn urlencode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.as_bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(*b as char),
-            _ => out.push_str(&format!("%{b:02X}")),
+impl Default for SearchEndpoints {
+    fn default() -> Self {
+        Self {
+            duckduckgo: Url::parse("https://html.duckduckgo.com/html/")
+                .expect("static DuckDuckGo URL is valid"),
+            bing: Url::parse("https://www.bing.com/search").expect("static Bing URL is valid"),
         }
     }
-    out
 }
 
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+pub async fn read(context: &AppContext, url: &str) -> Result<ReadResponse> {
+    read_with_max_chars(context, url, context.fetch.limits().max_output_chars).await
 }
 
-fn render_hits(hits: &[SearchHit], scraped: bool) -> String {
-    let mut s = String::new();
-    if hits.is_empty() {
-        return "No results.".to_string();
-    }
-    for (i, h) in hits.iter().enumerate() {
-        s.push_str(&format!("{}. {}\n   {}\n", i + 1, h.title, h.url));
-        if !h.snippet.is_empty() {
-            s.push_str(&format!("   {}\n", h.snippet));
-        }
-        if scraped {
-            s.push('\n');
-        }
-    }
-    s.trim_end().to_string()
+/// Read a page through the supplied shared context while applying a caller-specific
+/// Unicode-scalar Markdown limit.
+///
+/// Presentation adapters use this narrow seam when their output contract is
+/// stricter than the context-wide default; transport and network policy remain
+/// owned by [`AppContext`].
+pub async fn read_with_max_chars(
+    context: &AppContext,
+    url: &str,
+    max_chars: usize,
+) -> Result<ReadResponse> {
+    let request = FetchRequest::auto(url)?;
+    let page = context.fetch.fetch_request(request).await?;
+    ensure_success(page.status, &page.url, None)?;
+    let markdown = html_to_markdown_with_options(
+        &page.html,
+        &MarkdownOptions {
+            base_url: Some(page.url.clone()),
+            max_chars,
+        },
+    )?;
+    Ok(ReadResponse {
+        url: page.url,
+        status: page.status,
+        via: fetch_via_name(page.via),
+        markdown,
+    })
 }
 
-/// Print JSON (for agents) or plain text.
-pub fn emit(json_out: bool, json_val: &serde_json::Value, text: &str) -> Result<()> {
-    if json_out {
-        println!("{}", serde_json::to_string_pretty(json_val).context("serialize")?);
+pub async fn search(
+    context: &AppContext,
+    query: &str,
+    count: usize,
+    scrape: bool,
+) -> Result<SearchResponse> {
+    search_with_endpoints(context, query, count, scrape, &SearchEndpoints::default()).await
+}
+
+pub async fn search_with_endpoints(
+    context: &AppContext,
+    query: &str,
+    count: usize,
+    scrape: bool,
+    endpoints: &SearchEndpoints,
+) -> Result<SearchResponse> {
+    validate_search_input(query, count)?;
+    let query = query.trim();
+    let primary_url = search_url(&endpoints.duckduckgo, query, None);
+    let primary = fetch_search_html(context, primary_url)
+        .await
+        .and_then(|html| parse_duckduckgo_results(&html, count));
+
+    let (provider, hits, fallback_warning) = match primary {
+        Ok(hits) if !hits.is_empty() => ("duckduckgo", hits, None),
+        Ok(_) => {
+            let warning =
+                Some("DuckDuckGo returned a confirmed empty result set; used Bing fallback".into());
+            let url = search_url(&endpoints.bing, query, Some(count));
+            let html = fetch_search_html(context, url).await?;
+            ("bing", parse_bing_results(&html, count)?, warning)
+        }
+        Err(error) => {
+            let warning = Some(format!(
+                "DuckDuckGo primary failed ({}); used Bing fallback",
+                sanitized_error(&error)
+            ));
+            let url = search_url(&endpoints.bing, query, Some(count));
+            let html = fetch_search_html(context, url).await?;
+            ("bing", parse_bing_results(&html, count)?, warning)
+        }
+    };
+
+    let results = if scrape {
+        scrape_hits(context, hits).await
     } else {
-        println!("{text}");
+        hits
+    };
+    Ok(SearchResponse {
+        query: query.to_string(),
+        count: results.len(),
+        results,
+        provider,
+        fallback_warning,
+    })
+}
+
+pub fn parse_duckduckgo_results(html: &str, limit: usize) -> Result<Vec<SearchHit>> {
+    let document = Html::parse_document(html);
+    let container = selector("div.result", "duckduckgo")?;
+    let link = selector("a.result__a", "duckduckgo")?;
+    let snippet = selector(".result__snippet", "duckduckgo")?;
+    let mut hits = Vec::new();
+
+    for result in document.select(&container) {
+        if hits.len() == limit.min(MAX_SEARCH_RESULTS) {
+            break;
+        }
+        let Some(anchor) = result.select(&link).next() else {
+            continue;
+        };
+        let Some(href) = anchor.value().attr("href") else {
+            continue;
+        };
+        let Some(url) = decode_duckduckgo_url(href) else {
+            continue;
+        };
+        let title = bounded_text(anchor, MAX_TITLE_CHARS);
+        if title.is_empty() {
+            continue;
+        }
+        let snippet = result
+            .select(&snippet)
+            .next()
+            .map(|element| bounded_text(element, MAX_SNIPPET_CHARS))
+            .unwrap_or_default();
+        hits.push(SearchHit {
+            title,
+            url,
+            snippet,
+            markdown: None,
+            scrape_error: None,
+        });
+    }
+
+    if hits.is_empty() && !confirmed_empty(html) {
+        return Err(Error::UpstreamLayout {
+            service: "duckduckgo",
+        });
+    }
+    Ok(hits)
+}
+
+pub fn parse_bing_results(html: &str, limit: usize) -> Result<Vec<SearchHit>> {
+    let document = Html::parse_document(html);
+    let container = selector("li.b_algo", "bing")?;
+    let link = selector("h2 a", "bing")?;
+    let snippet = selector(".b_caption p", "bing")?;
+    let mut hits = Vec::new();
+
+    for result in document.select(&container) {
+        if hits.len() == limit.min(MAX_SEARCH_RESULTS) {
+            break;
+        }
+        let Some(anchor) = result.select(&link).next() else {
+            continue;
+        };
+        let Some(url) = anchor
+            .value()
+            .attr("href")
+            .and_then(|href| Url::parse(href).ok())
+            .filter(http_url)
+        else {
+            continue;
+        };
+        let title = bounded_text(anchor, MAX_TITLE_CHARS);
+        if title.is_empty() {
+            continue;
+        }
+        let snippet = result
+            .select(&snippet)
+            .next()
+            .map(|element| bounded_text(element, MAX_SNIPPET_CHARS))
+            .unwrap_or_default();
+        hits.push(SearchHit {
+            title,
+            url,
+            snippet,
+            markdown: None,
+            scrape_error: None,
+        });
+    }
+
+    if hits.is_empty() && !confirmed_empty(html) {
+        return Err(Error::UpstreamLayout { service: "bing" });
+    }
+    Ok(hits)
+}
+
+async fn fetch_search_html(context: &AppContext, url: Url) -> Result<String> {
+    let page = context
+        .fetch
+        .fetch_request(FetchRequest::request(url.as_str())?)
+        .await?;
+    ensure_success(page.status, &page.url, None)?;
+    Ok(page.html)
+}
+
+async fn scrape_hits(context: &AppContext, hits: Vec<SearchHit>) -> Vec<SearchHit> {
+    let hit_count = hits.len();
+    let total_budget = context.fetch.limits().max_output_chars;
+    let base_budget = total_budget.checked_div(hit_count).unwrap_or_default();
+    let remainder = total_budget.checked_rem(hit_count).unwrap_or_default();
+    let mut completed = stream::iter(hits.into_iter().enumerate())
+        .map(|(index, mut hit)| async move {
+            let max_chars = base_budget + usize::from(index < remainder);
+            match read_with_max_chars(context, hit.url.as_str(), max_chars).await {
+                Ok(response) => hit.markdown = Some(response.markdown),
+                Err(error) => hit.scrape_error = Some(sanitized_error(&error)),
+            }
+            (index, hit)
+        })
+        .buffer_unordered(SCRAPE_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    completed.sort_by_key(|(index, _)| *index);
+    completed.into_iter().map(|(_, hit)| hit).collect()
+}
+
+pub fn validate_search_input(query: &str, count: usize) -> Result<()> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(Error::InvalidInput("search query cannot be empty".into()));
+    }
+    if query.chars().count() > MAX_QUERY_CHARS {
+        return Err(Error::InvalidInput(format!(
+            "search query cannot exceed {MAX_QUERY_CHARS} characters"
+        )));
+    }
+    if !(1..=MAX_SEARCH_RESULTS).contains(&count) {
+        return Err(Error::InvalidInput(format!(
+            "search result count must be between 1 and {MAX_SEARCH_RESULTS}"
+        )));
     }
     Ok(())
+}
+
+fn search_url(base: &Url, query: &str, count: Option<usize>) -> Url {
+    let mut url = base.clone();
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("q", query);
+        if let Some(count) = count {
+            pairs.append_pair("count", &count.to_string());
+        }
+    }
+    url
+}
+
+fn decode_duckduckgo_url(href: &str) -> Option<Url> {
+    let base = Url::parse("https://duckduckgo.com/").ok()?;
+    let wrapped = base.join(href).ok()?;
+    if wrapped
+        .host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case("duckduckgo.com"))
+    {
+        if let Some((_, target)) = wrapped.query_pairs().find(|(name, _)| name == "uddg") {
+            return Url::parse(&target).ok().filter(http_url);
+        }
+    }
+    http_url(&wrapped).then_some(wrapped)
+}
+
+fn selector(css: &str, service: &'static str) -> Result<Selector> {
+    Selector::parse(css).map_err(|_| Error::Parse {
+        kind: service,
+        message: "internal result selector is invalid".into(),
+    })
+}
+
+fn bounded_text(element: ElementRef<'_>, max_chars: usize) -> String {
+    let text = element.text().collect::<String>();
+    truncate_chars(
+        &text.split_whitespace().collect::<Vec<_>>().join(" "),
+        max_chars,
+    )
+}
+
+fn confirmed_empty(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    lower.contains("no results found")
+        || lower.contains("did not match any documents")
+        || lower.contains("class=\"no-results\"")
+        || lower.contains("class='no-results'")
+}
+
+fn http_url(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+fn fetch_via_name(via: FetchVia) -> &'static str {
+    match via {
+        FetchVia::Request => "request",
+        FetchVia::Browser => "browser",
+        FetchVia::Test => "test",
+    }
+}
+
+pub(crate) fn ensure_success(status: u16, url: &Url, retry_after_secs: Option<u64>) -> Result<()> {
+    if (200..300).contains(&status) {
+        return Ok(());
+    }
+    if status == 429 {
+        return Err(Error::RateLimited { retry_after_secs });
+    }
+    Err(Error::HttpStatus {
+        status,
+        url: url.clone(),
+    })
+}
+
+pub(crate) fn sanitized_error(error: &Error) -> String {
+    match error {
+        Error::InvalidInput(_) => "invalid input".into(),
+        Error::Policy(_) => "network policy rejected the request".into(),
+        Error::Dns(_) => "DNS resolution failed".into(),
+        Error::Timeout { .. } => "request timed out".into(),
+        Error::BodyLimit { .. } => "response exceeded the configured body limit".into(),
+        Error::HttpStatus { status, .. } => format!("HTTP status {status}"),
+        Error::Browser(_) => "browser rendering failed".into(),
+        Error::Parse { kind, .. } => format!("{kind} response could not be parsed"),
+        Error::Authentication(_) => "authentication is required or expired".into(),
+        Error::RateLimited { retry_after_secs } => retry_after_secs.map_or_else(
+            || "upstream rate limit reached".into(),
+            |seconds| format!("upstream rate limit reached; retry after {seconds} seconds"),
+        ),
+        Error::RobotsDenied(_) => "robots policy denied the request".into(),
+        Error::Cancelled => "operation was cancelled".into(),
+        Error::UpstreamLayout { service } => format!("{service} response layout changed"),
+        Error::Io(_) | Error::Http(_) => "transport failed".into(),
+    }
+}
+
+/// Compatibility presentation shim used by the Task 6 feed/YouTube wrappers.
+/// Task 8's typed services never call this function.
+pub fn emit(json_out: bool, json_val: &serde_json::Value, text: &str) -> AnyResult<()> {
+    crate::output::emit_json_value(json_out, json_val, text)
 }

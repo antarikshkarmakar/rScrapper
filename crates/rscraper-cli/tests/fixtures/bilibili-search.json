@@ -1,0 +1,9 @@
+{
+  "code": 0,
+  "data": {
+    "result": [
+      {"title":"Learn <em class=\"keyword\">Rust</em>","bvid":"BV1fixture01","author":"up-user","description":"A fixture video"},
+      {"title":"Second video","bvid":"BV1fixture02","author":"other","description":"Another fixture"}
+    ]
+  }
+}

@@ -3,6 +3,7 @@ name = "rscraper-core"
 description = "Core engine for rScrapper: fetching, CSS/XPath selectors with element memory, HTML-to-Markdown, and a concurrent spider."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -11,6 +12,7 @@ repository.workspace = true
 tokio = { workspace = true }
 reqwest = { workspace = true }
 scraper = { workspace = true }
+ego-tree = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -18,3 +20,19 @@ anyhow = { workspace = true }
 regex = { workspace = true }
 url = { workspace = true }
 futures-util = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
+encoding_rs = { workspace = true }
+mime = { workspace = true }
+async-trait = { workspace = true }
+chromiumoxide = { workspace = true }
+tempfile = { workspace = true }
+async-tungstenite = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+rcgen = "0.13"
+tokio-rustls = "0.26"
+pulldown-cmark = { workspace = true }
+
+[lints]
+workspace = true

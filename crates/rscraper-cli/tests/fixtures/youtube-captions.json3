@@ -1,0 +1,26 @@
+{
+  "events": [
+    {
+      "tStartMs": 0,
+      "dDurationMs": 1000,
+      "segs": [
+        {"utf8": "First "},
+        {"utf8": "line"}
+      ]
+    },
+    {
+      "tStartMs": 1200,
+      "dDurationMs": 100,
+      "segs": [
+        {"utf8": "\n"}
+      ]
+    },
+    {
+      "tStartMs": 2600,
+      "dDurationMs": 1000,
+      "segs": [
+        {"utf8": "Second &amp; final line"}
+      ]
+    }
+  ]
+}

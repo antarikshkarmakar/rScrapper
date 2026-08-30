@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Example RSS</title>
+    <item>
+      <title>RSS &amp; News</title>
+      <link>/posts/alpha</link>
+      <description><![CDATA[<p>First <strong>line</strong><br>Second &amp; final.</p>]]></description>
+      <pubDate>Tue, 27 Aug 2024 14:15:16 GMT</pubDate>
+    </item>
+    <item>
+      <title>GUID Fallback</title>
+      <guid isPermaLink="true">/guid-post</guid>
+      <description>Plain &amp; simple</description>
+      <pubDate>Tue, 27 Aug 2024 15:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <pubDate>Tue, 27 Aug 2024 16:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,13 @@
+[
+  {
+    "number": 99,
+    "title": "A pull request",
+    "html_url": "https://github.com/acme/widget/pull/99",
+    "pull_request": { "url": "https://api.github.com/repos/acme/widget/pulls/99" }
+  },
+  {
+    "number": 11,
+    "title": "First issue",
+    "html_url": "https://github.com/acme/widget/issues/11"
+  }
+]

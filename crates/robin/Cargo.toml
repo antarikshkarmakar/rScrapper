@@ -1,8 +1,9 @@
 [package]
 name = "robin"
-description = "Robin — AI-powered dark web OSINT research (Tor + LLM refine/filter/summarize)."
+description = "Tor-enforced, bounded LLM-assisted research with untrusted-source reports."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -17,7 +18,21 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-anyhow = { workspace = true }
 url = { workspace = true }
-scraper = "0.21"
+scraper = { workspace = true }
 clap = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+data-encoding = { workspace = true }
+sha3 = { workspace = true }
+icu_properties = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

@@ -1,13 +1,17 @@
 # rScrapper Platform Rewrite Design
 
-**Status:** Approved for implementation planning  
-**Date:** 2026-08-27  
+**Status:** Implemented through the 0.2.0 release checkpoint; controller review
+and history consolidation remain
+
+**Date:** 2026-08-27
+
+**Implementation checkpoint:** 2026-08-30
 **Target:** rScrapper 0.2.0  
 **Audience:** Maintainers and contributors implementing or reviewing the rewrite
 
 ## Summary
 
-rScrapper 0.2.0 will replace the current best-effort internals with a secure,
+rScrapper 0.2.0 replaces the previous best-effort internals with a secure,
 bounded, testable scraping platform while preserving the documented CLI
 commands, HTTP routes, MCP tool names, and JSON response shapes. Breaking Rust
 library changes are allowed where the current interfaces prevent correctness.
@@ -461,13 +465,15 @@ tests own exact parsing assertions.
 
 ## CI and Quality Gates
 
-CI runs on Linux with the declared MSRV and current stable Rust:
+CI runs on Linux with exact Rust 1.88.0 and current stable Rust:
 
 1. `cargo fmt --all -- --check`
-2. `cargo clippy --workspace --all-targets -- -D warnings`
-3. `cargo test --workspace`
-4. `cargo test --workspace --doc`
-5. `cargo audit`
+2. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+3. `cargo test --workspace --all-targets --all-features`
+4. `cargo test --workspace --doc --all-features`
+5. executable README contract checks
+6. `cargo audit --deny warnings` with cargo-audit 0.22.2
+7. an all-feature release build
 
 The committed lockfile may not contain known vulnerabilities. Yanked or
 unmaintained transitive dependencies require a documented exception and an
@@ -504,11 +510,39 @@ this order:
 8. Axum API;
 9. MCP SDK migration;
 10. Robin pipeline;
-11. end-to-end documentation, audit, and release gates.
+11. Robin, browser lifecycle, and end-to-end product integration;
+12. release identity, dependency alignment, documentation, CI, audit, and
+    release gates.
 
 Each slice begins with failing tests and ends with the full workspace test suite
-passing. The final implementation is delivered as one user-requested commit
-after all gates pass; intermediate local commits may be squashed before delivery.
+passing. Task 12 leaves one reviewable release checkpoint without rewriting
+earlier history. The controller owns independent approval and the requested
+final history consolidation.
+
+## Final implementation decisions
+
+- All five packages inherit version 0.2.0 and Rust 1.88. The locked parser stack
+  is `scraper = 0.27.0` with `ego-tree = 0.11`; the stale `fxhash 0.2.1`
+  path and yanked `chacha20 0.10.1` lock entry were removed.
+- The temporary 0.1 `fetch`/`FetchOptions` facade is removed. Typed
+  `FetchClient`/`FetchRequest`, fallible selectors, bounded Markdown,
+  `Crawler` streams, `AppContext`, and `PlatformCookieJar` are the 0.2
+  public contracts.
+- MCP uses rmcp 3.1.4. Its guarded stdio transport has a deliberate single
+  prefetched-frame slot and backpressures additional pipelining; this is a
+  bounded limitation, not an unbounded request queue.
+- Browser cleanup completion is proved through owned lifecycle state: child
+  reaped, controller tasks zero, profile removed, proxy listener closed, owned
+  connections drained, and terminal state set. A former address-connect
+  assertion could observe an unrelated listener after ephemeral-port reuse and
+  was replaced with this ownership proof.
+- README commands are extracted from an explicit marker block, strictly
+  allowlisted, and executed with Cargo offline. SECURITY and migration documents
+  describe the implemented boundaries and source breaks rather than aspirational
+  guarantees.
+- CI uses immutable action revisions, least-privilege permissions, no secrets or
+  live tests, stable and exact-MSRV jobs, cargo-audit 0.22.2, and the locked
+  release graph. The Task 12 report records the fresh gate outputs and counts.
 
 ## Acceptance Criteria
 
