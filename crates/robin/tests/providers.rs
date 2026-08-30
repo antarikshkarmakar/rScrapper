@@ -94,15 +94,13 @@ async fn provider_adapters_send_exact_typed_requests_and_extract_text() {
             if kind == "gemini" {
                 Value::Null
             } else {
-                json!(format!(
-                    "{}",
-                    match kind {
-                        "openai" => "gpt-test",
-                        "claude" => "claude-test",
-                        "ollama" => "llama-test",
-                        _ => unreachable!(),
-                    }
-                ))
+                json!((match kind {
+                    "openai" => "gpt-test",
+                    "claude" => "claude-test",
+                    "ollama" => "llama-test",
+                    _ => unreachable!(),
+                })
+                .to_string())
             }
         );
         let serialized = String::from_utf8(request.body).unwrap();
